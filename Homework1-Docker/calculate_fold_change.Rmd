@@ -1,0 +1,32 @@
+---
+title: "hw1"
+output: html_document
+date: "2025-01-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Next we create the matrix
+```{r}
+# Create a 5x10 matrix of random integers
+set.seed(123) # Ensure reproducibility
+matrix_data <- matrix(sample(1:100, 50, replace=TRUE), nrow=5)
+
+colnames(matrix_data) <- c("cond1", "cond2", "cond3", "cond4", "cond5",
+                           "ctrl1", "ctrl2", "ctrl3", "ctrl4", "ctrl5")
+rownames(matrix_data) <- c("gene1", "gene2", "gene3", "gene4", "gene5")
+
+matrix_data
+```
+
+Compute the fold change
+```{r}
+# Compute fold change (example: cond vs. ctrl averages)
+cond_avg <- rowMeans(matrix_data[, 1:5])
+ctrl_avg <- rowMeans(matrix_data[, 6:10])
+fold_change <- cond_avg / ctrl_avg
+
+data.frame(Gene = rownames(matrix_data), FoldChange = fold_change)
+```
