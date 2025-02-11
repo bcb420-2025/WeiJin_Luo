@@ -1,0 +1,326 @@
+---
+title: "Assignment 1: Data set selection and initial Processing."
+author: "Wei Jin Luo"
+date: "2025-02-10"
+bibliography: A1.bib
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction to Data
+The dataset that I will process is [GSE195585](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE195585) and it is associated with this [paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9037237/#s3)[@Centner2022]
+
+The paper investigates the effects of collagen peptides (CP) combined with high-load resistance exercise on gene expression related to muscle protein synthesis. The study involved 30 participants who were randomized to perform leg extension exercises with either CP or a placebo and muscle biopsies were taken at various time points to analyze gene expression.
+
+
+## Installing necessary packages
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+if (!require("GEOquery", quietly = TRUE))
+    BiocManager::install("GEOquery")
+
+if (!require("edgeR", quietly = TRUE))
+    BiocManager::install("edgeR")
+
+if (!require("biomaRt", quietly = TRUE))
+    BiocManager::install("biomaRt")
+
+if (!require("knitr", quietly = TRUE))
+    install.packages("knitr")
+
+library(GEOquery)
+library(edgeR)
+library(biomaRt)
+library(knitr)
+```
+
+#### Downloading the data
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Define the GEO accession number
+geo_accession <- "GSE195585"
+
+# Define the file path to save the downloaded data
+file_path <- paste0(geo_accession, "_data.RData")
+
+# Check if the file already exists
+if (file.exists(file_path)) {
+  # Load the saved data
+  load(file_path)
+} else {
+  # Download the dataset
+  gse <- getGEO(geo_accession, GSEMatrix = TRUE)
+  expr_data <- exprs(gse[[1]])
+  
+  # Save the downloaded data
+  save(gse, expr_data, file = file_path)
+}
+
+# Download the supplementary file
+download_dir <- file.path(getwd(), "data")
+dir.create(download_dir)
+
+# Check if the data has already been downloaded
+if (!file.exists(file.path(download_dir, geo_accession))) {
+  getGEOSuppFiles(
+    geo_accession,
+    baseDir = download_dir,
+    fetch_files = TRUE
+  )
+  
+  
+  # Once the data has been download we can unpack some of the data
+  untar(file.path(download_dir, geo_accession, 'GSE195585_RAW.tar'), exdir = file.path(download_dir, geo_accession))
+}
+```
+
+After the data has been unpacked, I noticed that the gene expression data for each sample are in their own separate files, thus I will first need to combine the expression data from each sample into a single dataframe for analysis. Additionally, there is a lot of data from the paper since gene expression data was measured across multiple timepoints. For this assignment I will use the data from a single timepoint (4h) as suggested by Prof. Isserlin.
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Extract hour 4 data
+raw_count_files <- list.files(
+  path = file.path(download_dir, geo_accession),
+  pattern = "_4h_.*raw_counts.txt.gz", # Include "_4h_" in the pattern
+  full.names = TRUE
+)
+
+# Load the dataset into 1 dataframe
+combine_raw_counts <- function(file_list) {
+  combined_df <- NULL
+  
+  for (file in file_list) {
+    df <- read.table(gzfile(file), header = TRUE, sep = "\t")
+    
+    if (is.null(combined_df)) {
+      combined_df <- df
+    } else {
+      combined_df <- merge(combined_df, df, by = "ENTREZID", all = TRUE)
+    }
+  }
+  
+  return(combined_df)
+}
+
+# Combined dataframe with all the data
+combined_df <- combine_raw_counts(raw_count_files)
+# Sort the columns for easier reading
+sorted_columns <- c("ENTREZID", sort(grep("Placebo", colnames(combined_df), value = TRUE)), sort(grep("Verum", colnames(combined_df), value = TRUE)))
+inital_df <- combined_df[, sorted_columns]
+
+head(inital_df)
+```
+
+## Mapping Gene IDs to HUGO symbols
+First lets check to ensure that there are no NA values or any duplicated genes
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Any NA values should return FALSE
+anyNA(inital_df)
+
+# Any duplicated Genes should return 0
+sum(duplicated(rownames(inital_df)))
+```
+
+Now lets map the gene Ids to HUGO symbols by using the `biomaRt` package.
+```{r, error=FALSE, message=FALSE, warning=FALSE} 
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+ensembl <- biomaRt::useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+entrez_ids <- inital_df$ENTREZID
+cleaned_ids <- gsub("\\..*", "", entrez_ids)
+gene_mapping <- biomaRt::getBM(
+  attributes = c("ensembl_gene_id", "external_gene_name"),
+  filters = "ensembl_gene_id",
+  values = cleaned_ids,
+  mart = ensembl
+)
+head(gene_mapping)
+```
+
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Adding HUGO symbols to our dataframe
+inital_df$HUGO <- cleaned_ids
+inital_df$HUGO <- gene_mapping$external_gene_name[match(cleaned_ids, gene_mapping$ensembl_gene_id)]
+
+hugo_symbols_df <- inital_df[, c("ENTREZID", "HUGO", setdiff(names(inital_df), c("ENTREZID", "HUGO")))]
+head(hugo_symbols_df)
+```
+
+#### Cleaning the data
+## NA HUGO symbols
+First lets take a look at some of the potential issues that we have to handle in the data
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Check for any NA HUGO symbols
+na_symbols <- sum(is.na(hugo_symbols_df$HUGO))
+na_symbols
+```
+
+Since we only have a small amount of NA gene symbols, we can remove them without it affected the overall analysis too much
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Remove NA genes
+hugo_symbols_df <- hugo_symbols_df[!is.na(hugo_symbols_df$HUGO), ]
+sum(is.na(hugo_symbols_df$HUGO))
+```
+
+## No expression
+We can also remove rows that have no expression across all samples
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+expression_columns <- colnames(hugo_symbols_df)[!colnames(hugo_symbols_df) %in% c("ENTREZID", "HUGO")]
+nrow(hugo_symbols_df[rowSums(hugo_symbols_df[expression_columns] != 0) == 0, ])
+
+hugo_symbols_df <- hugo_symbols_df[!(rowSums(hugo_symbols_df[expression_columns] != 0) == 0), ]
+```
+
+## Empty Gene Symbols
+Next we will handle the empty gene symbols
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Empty gene symbols: 
+sum(hugo_symbols_df$HUGO == "")
+```
+There is quite a bit of empty gene symbols 10794, I don't want to remove them since this will affect the data. Since I will not be removing these empty gene symbols I will use the gene id in place of a HUGO symbol thus my final dataset produced **will NOT be according to the exact specifications in the assignment requirements**.
+
+## Handling Duplicate Gene Symbols
+Since empty gene symbols will also be counted as duplicated, we will temporarily remove them to handle to duplicates with actual HUGO symbols
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Removed empty gene symbols
+no_blanks <- hugo_symbols_df[!hugo_symbols_df$HUGO == "", ]
+```
+Now we can investigate some of the duplicates
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Dealing with duplicates:
+duplicated_hugo <- unique(no_blanks$HUGO[duplicated(no_blanks$HUGO)])
+length(duplicated_hugo)
+
+# Investigate some of the duplicates
+head(no_blanks[no_blanks$HUGO == 'Y_RNA', ])
+head(no_blanks[no_blanks$HUGO == 'Metazoa_SRP', ])
+head(no_blanks[no_blanks$HUGO == 'U3', ])
+```
+
+I noticed that for a lot of the duplicated HUGO symbols, much of the expression data in each column is 0, and since there is also only a small amount of duplicated genes compared to the total, I believe that it is ok to remove these duplicated HUGO symbols
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+hugo_symbols_df <- hugo_symbols_df[!hugo_symbols_df$HUGO %in% duplicated_hugo, ]
+```
+
+
+Now since, we won't remove all the blank gene symbols I add the gene ID in place of the HUGO symbol for those genes
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+hugo_symbols_df$HUGO[hugo_symbols_df$HUGO == ""] <- hugo_symbols_df$ENTREZID[hugo_symbols_df$HUGO == ""]
+```
+
+## Removing Low Gene Counts
+I filter by counts per million (CPM) and remove values that don't have at least 1 cpm. Since we have 30 total samples 15 control and 15 CP supplemented, we will set the minimum threshold to at 1 cpm in at least 15 samples
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+min_samples <- 15
+
+# Exclude ENTREZID and HUGO columns
+dataset_no_entrez_hugo <- as.matrix(hugo_symbols_df[, -c(1, 2)])
+cpm_values <- edgeR::cpm(dataset_no_entrez_hugo)
+
+sufficiently_expressed <- rowSums(cpm_values > 1) >= min_samples
+
+
+# Final cleaned data
+filtered_data <- hugo_symbols_df[sufficiently_expressed, ]
+rownames(filtered_data) <- filtered_data$HUGO
+final_dataset <- filtered_data[, -c(1, 2)]
+
+# Also keep a low_counts_not_removed df for comparison
+low_counts_not_removed <- hugo_symbols_df
+rownames(low_counts_not_removed) <- low_counts_not_removed$HUGO
+low_counts_not_removed <- low_counts_not_removed[, -c(1, 2)]
+```
+
+#### Normalization
+Create a density plot
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+create_density_plot <- function(dataset) {
+  counts_density <- apply(log2(dataset), 2, density)
+  
+  #calculate the limits across all the samples
+  xlim <- 0; ylim <- 0
+  for (i in 1:length(counts_density)) {
+    xlim <- range(c(xlim, counts_density[[i]]$x));
+    ylim <- range(c(ylim, counts_density[[i]]$y))
+  }
+  cols <- rainbow(length(counts_density))
+  ltys <- rep(1, length(counts_density))
+  
+  #plot the first density plot to initialize the plot
+  plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+  ylab="Smoothing density of log2-CPM",
+  main="", cex.lab = 0.85)
+  
+  #plot each line
+  for (i in 1:length(counts_density)) {
+    lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+  }
+  
+  #create legend
+  legend("topright", colnames(dataset),
+  col=cols, lty=ltys, cex=0.3,
+  border ="blue", text.col = "green4",
+  merge = TRUE, bg = "gray90")
+}
+```
+
+First we can visualize the our density plot without the low count genes removed
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+create_density_plot(low_counts_not_removed)
+```
+
+Next we can visualize the density plot with the low counts removed
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+create_density_plot(final_dataset)
+```
+
+Finally we will apply TMM normalization to our dataset
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Apply normalization
+d <- DGEList(counts = final_dataset)
+d <- calcNormFactors(d)
+normalized_counts <- cpm(d)
+
+create_density_plot(normalized_counts)
+```
+
+## Interpret and Document Questions
+**1. Why is the dataset of interest to you?**
+
+This dataset caught my attention because I am deeply passionate about fitness. A highly debated topic within the fitness community is whether certain supplements genuinely have an effect or are merely placebos or gimmicks. This area requires more research, and I found this paper particularly intriguing. The results presented in this study are also quite interesting.
+  
+**2. What are the control and test conditions of the dataset?**
+
+The control condition of the dataset is resistance training without collagen peptide (CP) supplementation and the test condition is resistance training with CP supplementation
+
+**3. How many samples in each of the conditions of your dataset?**
+
+There are 15 samples for the treatment group and 15 samples for the control
+
+**4. Were there expression values that were not unique for specific genes? How did you handle these?**
+
+There were a handful of duplicate gene symbols, however, much of the expression data in each column is 0, and since there is also only a small amount of duplicated genes compared to the total, I decided to remove the duplicate gene symbols
+
+**5. Were there expression values that could not be mapped to current HUGO symbols?**
+
+Yes, there were quite a few values that couldn't be mapped to current HUGO symbols. Since there were so many I decided to keep those values in because removing them could possibly affect the results
+
+**6. Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?**
+
+After cleaning and normalization, I didn't handle any specific outliers, the original paper also doesn't specifically mention how they handled any outliers
+
+**7. How did you handle replicates?**
+
+There were a few genes with multiple entries and since there were a small amount compared to the overall data, I removed them
+
+**8. What is the final coverage of your dataset?**
+
+The final coverage of my dataset had 12209 genes
+
+## References
+This analysis uses several R packages including `BiocManager` [@BiocManager], `GEOquery` [@GEOquery], `edgeR` [@edgeR], `biomaRt` [@BioMart], and `knitr` [@knitr].
