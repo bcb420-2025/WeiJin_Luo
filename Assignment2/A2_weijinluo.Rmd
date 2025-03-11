@@ -1,0 +1,532 @@
+---
+title: "Assignment 2: Differential Gene expression and Preliminary ORA"
+author: "Wei Jin Luo"
+date: "2025-03-01"
+bibliography: A2.bib
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# Introduction
+Task: Take normalized expression data that was created in Assignment #1 and rank your genes according to differential expression. Once your list is ranked you will perform thresholded over-representation analysis to highlight dominant themes in your top set of genes.
+
+## Background from A1
+The data used in this anaysis was taken from the [GEO](https://www.ncbi.nlm.nih.gov/geo/) database and has the accession number [GSE195585](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE195585). The data is associated with this [paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9037237)[@Centner2022], where the effects of collagen peptides (CP) combined with high-load resistance exercise on gene expression related to muscle protein synthesis was studied.
+
+For A1, we performed the following:
+- Computed overview statistics to assess data quality for the control and test conditions in the dataset
+- Map the original Gene symbols to HUGO gene symbols and handle any missing symbols/ duplicates
+- Cleaned the data by removing any outliers
+- Applied normalization
+
+The final dataset has HUGO gene symbols as row names, sample names as columns and the normalized expression for each gene for each respective sample
+
+## Installing packages
+We will use edgeR for the gene expression analysis
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Check if Biocondutor is installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# Install knitr
+if (!requireNamespace("knitr", quietly = TRUE))
+    install.packages("knitr")
+
+# Install edgeR
+if (!requireNamespace("edgeR", quietly = TRUE))
+    BiocManager::install("edgeR")
+
+if (!requireNamespace("limma", quietly = TRUE))
+  BiocManager::install("limma")
+
+library(gprofiler2)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+# Differential Expression Analysis 
+First we need to load the normalized data from A1
+```{r}
+normalized_expression_data <- as.matrix(readRDS("normalized_expression_data.rds"))
+```
+
+## MDS Plot Grouped By Treatment
+```{r, error=FALSE, message=FALSE, warning=FALSE}
+# Extract sample names
+sample_names <- colnames(normalized_expression_data)
+
+# Identify treatment groups
+treatment <- ifelse(grepl("^Placebo", sample_names), "Placebo", "Verum")
+
+# Identify time points (0h vs. 4h)
+time_point <- ifelse(grepl("_0h_", sample_names), "0h", "4h")
+
+group <- factor(paste(treatment, time_point, sep = "_"))
+
+d <- edgeR::DGEList(counts=normalized_expression_data, group = group)
+
+limma::plotMDS(d, 
+        labels = NULL,
+        pch = 1,      
+        top = 100,    
+        col = c("purple", "orange", "blue", "red")[factor(group)])  # Different colors for each condition
+
+title(main = "MDS Plot by Treatment Condition and Time Point")
+
+legend("topright", 
+       legend = levels(group),  # Legend labels (Placebo_0h, Placebo_4h, Verum_0h, Verum_4h)
+       col = c("purple", "orange", "blue", "red"),
+       pch = 1,
+       cex = 0.7,
+       title = "Condition & Time")
+```
+
+Based on our MDS plots, grouping by treatment is the viable factor as samples with the same treatment generally tend to cluster together. This also makes sense as the treatment is also the grouping factor in the study
+
+**Q1**
+For the differential expression analysis I decided to use the Quasi liklihood model which is good for more complicated models and RNASeq experiments. The p-value threshold of 0.05 was used to be consistent with the paper and it's also the standard thresold for statistical significance. 
+
+**Q2**
+The Benjamini-Hochberg method was also used for multiple hypothesis correction as it was the method used in lecture and it has a good balance of specificity and sensitivity.
+
+## Using edgeR
+```{r}
+sample_info <- data.frame(
+    sample = colnames(d$counts),
+    group = ifelse(grepl("^Placebo", colnames(d$counts)), "Placebo", "Verum"),
+    time = ifelse(grepl("_0h", colnames(d$counts)), "0h", "4h") 
+)
+
+# Convert to factors
+sample_info$group <- factor(sample_info$group, levels = c("Placebo", "Verum"))  # Ensure correct reference level
+sample_info$time <- factor(sample_info$time, levels = c("0h", "4h"))  # Ensure correct reference level
+
+# Define model matrix with interaction term (group * time)
+model_design <- model.matrix(~ group * time, data = sample_info)
+
+d <- edgeR::estimateDisp(d, model_design)
+
+fit <- edgeR::glmQLFit(d, model_design)
+```
+
+First compare placebo baseline vs placebo 4h
+```{r}
+# Compare Placebo 4h vs. Placebo 0h
+results_Placebo <- edgeR::glmQLFTest(fit, contrast = c(0, 0, 1, 0))  # Placebo 4h vs. Placebo 0h
+topfit_Placebo <- edgeR::topTags(results_Placebo, sort.by = "PValue", n = nrow(d$counts), adjust.method = "BH")
+head(topfit_Placebo$table)
+```
+Number of genes that pass the p-value threshold of 0.05 for the placebo group
+```{r}
+length(which(topfit_Placebo$table$PValue < 0.05))
+```
+
+Number of genes that pass the correction for the placebo group
+```{r}
+length(which(topfit_Placebo$table$FDR < 0.05))
+```
+
+Next we can do the same thing for the collagen peptide treatment group
+```{r}
+# Compare Verum 4h vs. Verum 0h
+results_Verum <- edgeR::glmQLFTest(fit, contrast = c(0, 0, 1, 1))  # Verum 4h vs. Verum 0h 
+
+# Extract top differentially expressed genes
+topfit_Verum <- edgeR::topTags(results_Verum, sort.by = "PValue", n = nrow(d$counts), adjust.method = "BH")
+
+head(topfit_Verum$table)
+```
+
+Number of genes that pass the p-value threshold of 0.05 for the collagen peptide treatment group
+```{r}
+length(which(topfit_Verum$table$PValue < 0.05))
+```
+
+Number of genes that pass the correction for the treatment group
+```{r}
+length(which(topfit_Verum$table$FDR < 0.05))
+```
+
+We can see that at the 4 hour timepoint, CP group shows a stronger transcriptional response at the 4-hour time point, with more DE genes passing both p-value and BH thresholds compared to the Placebo group.
+
+This suggests that CP supplementation has a broader impact on gene expression, potentially affecting more biological pathways or processes. Which is consistent with the findings in the paper
+
+# Plotting (Q3)
+## Plotting with MA Plot with genes of interest highlighted
+```{r}
+# Create an MA plot for Placebo 4h vs. 0h
+ma_data <- topfit_Placebo$table
+ma_data$AverageExpression <- rowMeans(d$counts[rownames(ma_data), ])
+ma_data$Significant <- ifelse(ma_data$FDR < 0.05 & abs(ma_data$logFC) > 1, "Significant", "Not Significant")
+
+# Highlight genes of interest (e.g., top 10 most significant genes)
+ma_data$GeneOfInterest <- ifelse(rownames(ma_data) %in% rownames(ma_data)[1:10], "Yes", "No")
+
+ggplot(ma_data, aes(x = AverageExpression, y = logFC, color = Significant, shape = GeneOfInterest, size = GeneOfInterest)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Not Significant" = "gray", "Significant" = "red")) +
+  scale_shape_manual(values = c("No" = 16, "Yes" = 17)) +  # Use triangles for genes of interest
+  scale_size_manual(values = c("No" = 2, "Yes" = 5)) + # Also make them larger
+  theme_minimal() +
+  labs(title = "MA Plot: Placebo 4h vs. 0h",
+       x = "Average Expression (log2)",
+       y = "Log2 Fold Change",
+       color = "Significant",
+       shape = "Gene of Interest") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black")  # Add a horizontal line at logFC = 0
+```
+
+```{r}
+# Create an MA plot for Placebo 4h vs. 0h
+ma_data <- topfit_Verum$table
+ma_data$AverageExpression <- rowMeans(d$counts[rownames(ma_data), ])
+ma_data$Significant <- ifelse(ma_data$FDR < 0.05 & abs(ma_data$logFC) > 1, "Significant", "Not Significant")
+
+ma_data$GeneOfInterest <- ifelse(rownames(ma_data) %in% rownames(ma_data)[1:10], "Yes", "No")
+
+ggplot(ma_data, aes(x = AverageExpression, y = logFC, color = Significant, shape = GeneOfInterest, size = GeneOfInterest)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Not Significant" = "gray", "Significant" = "red")) +
+  scale_shape_manual(values = c("No" = 16, "Yes" = 17)) +  # Use triangles for genes of interest
+  scale_size_manual(values = c("No" = 2, "Yes" = 5)) + # Also make them larger
+  theme_minimal() +
+  labs(title = "MA Plot: Collagen Peptide Treatment 4h vs. 0h",
+       x = "Average Expression (log2)",
+       y = "Log2 Fold Change",
+       color = "Significant",
+       shape = "Gene of Interest") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black")
+```
+
+## Plotting with Volcano Plot
+Creating a volcano plot for the placebo group
+```{r}
+# Create a volcano plot for Verum 4h vs. 0h
+volcano_data <- topfit_Placebo$table
+volcano_data$Significant <- ifelse(volcano_data$FDR < 0.05 & abs(volcano_data$logFC) > 1, "Significant", "Not Significant")
+
+volcano_data$GeneOfInterest <- ifelse(rownames(volcano_data) %in% rownames(volcano_data)[1:10], "Yes", "No")
+
+ggplot(volcano_data, aes(x = logFC, y = -log10(PValue), color = Significant, shape = GeneOfInterest)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Not Significant" = "gray", "Significant" = "red")) +
+  scale_shape_manual(values = c("No" = 16, "Yes" = 17)) +  # Use triangles for genes of interest
+  theme_minimal() +
+  labs(title = "Volcano Plot: Placebo 4h vs. 0h",
+       x = "Log2 Fold Change",
+       y = "-log10(P-value)",
+       color = "Significant",
+       shape = "Gene of Interest") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") 
+```
+
+Creating a volcano plot for the treatment group
+```{r}
+# Create a volcano plot for Treatment 4h vs. 0h
+volcano_data <- topfit_Verum$table
+volcano_data$Significant <- ifelse(volcano_data$FDR < 0.05 & abs(volcano_data$logFC) > 1, "Significant", "Not Significant")
+
+volcano_data$GeneOfInterest <- ifelse(rownames(volcano_data) %in% rownames(volcano_data)[1:10], "Yes", "No")
+
+ggplot(volcano_data, aes(x = logFC, y = -log10(PValue), color = Significant, shape = GeneOfInterest)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Not Significant" = "gray", "Significant" = "red")) +
+  scale_shape_manual(values = c("No" = 16, "Yes" = 17)) +  
+  theme_minimal() +
+  labs(title = "Volcano Plot: Collagen Peptide Treatment 4h vs. 0h",
+       x = "Log2 Fold Change",
+       y = "-log10(P-value)",
+       color = "Significant",
+       shape = "Gene of Interest") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") 
+```
+
+## Heatmap
+Next we can visualize the top hits with a heatmap
+```{r}
+verum_samples <- colnames(d$counts)[grepl("Verum", colnames(d$counts))]
+placebo_samples <- colnames(d$counts)[grepl("Placebo", colnames(d$counts))]
+all_samples <- c(verum_samples, placebo_samples)
+
+heatmap_data <- d$counts[, all_samples]
+
+top_genes <- rownames(topfit_Verum$table)[topfit_Verum$table$PValue < 0.05][1:50]
+heatmap_data <- heatmap_data[top_genes, ]
+
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+
+if (min(heatmap_data_scaled) < 0) {
+  heatmap_col <- colorRamp2(
+    c(min(heatmap_data_scaled), 0, max(heatmap_data_scaled)),
+    c("blue", "white", "red")
+  )
+} else {
+  heatmap_col <- colorRamp2(
+    range(heatmap_data_scaled),
+    c("white", "red")
+  )
+}
+
+annotation_df <- data.frame(
+  Group = sample_info$group[colnames(d$counts) %in% all_samples],
+  Time = sample_info$time[colnames(d$counts) %in% all_samples],
+  stringsAsFactors = FALSE
+)
+rownames(annotation_df) <- colnames(heatmap_data_scaled)
+
+annotation_colors <- list(
+  Group = c(Placebo = "blue", Verum = "red"),
+  Time = c(`0h` = "gray", `4h` = "black")
+)
+
+heatmap_annotation <- HeatmapAnnotation(
+  df = annotation_df,
+  col = annotation_colors
+)
+
+Heatmap(
+  as.matrix(heatmap_data_scaled),
+  col = heatmap_col,
+  name = "Scaled Expression",
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_heatmap_legend = TRUE,
+  top_annotation = heatmap_annotation,
+  column_title = "Heatmap of Top 50 DE Genes (Collagen Peptide Treatment and Placebo, 4h vs. 0h, P-value < 0.05)",
+  column_title_gp = gpar(fontsize = 8) 
+)
+```
+
+**Q4**
+We can see from the heatmap that at the 0h (baseline) time point the placebo and treatment group typically don't have any clustering which is expected. However at the 4 hour time point we see that there is more clustering between the groups, although we also still see quite a bit of variability.
+
+The treatment (CP supplementation) has induced changes in gene expression that differentiate the treatment group from the placebo group.These changes are consistent enough across samples to cause clustering, indicating a treatment effect.
+Despite the increased clustering, there is still variability within the groups, which could be due to the individual differences in the samples.
+
+# Thresholded over-representation analysis
+**Q1**
+I will use the g:Profiler to run the ORA as this was the method I used when doing the homework assignment. 
+
+**Q2**
+The paper used KEGG for annotation data, but I also included Reactome and GO:BP so we can have more gene sets. The versions are as follows:
+
+GO:BP – annotations: BioMart
+classes: releases/2024-10-27
+
+KEGG – KEGG FTP Release 2024-01-22
+
+REAC – annotations: BioMart
+classes: 2025-2-3
+
+## Collagen Peptide Treatment Group
+First we will do ORA with the collagen peptide treatment group
+
+```{r}
+# Extract significantly up-regulated genes (logFC > 0, FDR < 0.05)
+up_genes <- rownames(topfit_Verum$table)[topfit_Verum$table$logFC > 0 & topfit_Verum$table$FDR < 0.05]
+
+# Extract significantly down-regulated genes (logFC < 0, FDR < 0.05)
+down_genes <- rownames(topfit_Verum$table)[topfit_Verum$table$logFC < 0 & topfit_Verum$table$FDR < 0.05]
+
+# Extract all differentially expressed genes (FDR < 0.05)
+all_genes <- rownames(topfit_Verum$table)[topfit_Verum$table$FDR < 0.05]
+
+# Run ORA for up-regulated genes
+ora_up <- gost(
+  query = up_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC") 
+)
+
+# Run ORA for down-regulated genes
+ora_down <- gost(
+  query = down_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC")
+)
+
+# Run ORA for all genes
+ora_all <- gost(
+  query = all_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC")
+)
+```
+
+Gene sets in treatment group for upregulated genes before filtering: `r nrow(ora_up$result)`
+
+Gene sets in downregulated genes before filtering: `r nrow(ora_down$result)`
+
+Gene sets in all genes before filtering: `r nrow(ora_all$result)`
+
+Next we can filter the genes by term size:
+```{r}
+# Filter gene sets with a minimum of 10 genes and a maximum of 500 genes
+ora_up_filtered <- ora_up$result[ora_up$result$term_size >= 10 & ora_up$result$term_size <= 500, ]
+ora_down_filtered<- ora_down$result[ora_down$result$term_size >= 10 & ora_down$result$term_size <= 500, ]
+ora_all_filtered <- ora_all$result[ora_all$result$term_size >= 10 & ora_all$result$term_size <= 500, ]
+```
+
+Gene sets in treatment group for upregulated genes after filtering: `r nrow(ora_up_filtered)`
+
+Gene sets in treatment group for downregulated genes after filtering: `r nrow(ora_down_filtered)`
+
+Gene sets in all genes after filtering: `r nrow(ora_all_filtered)`
+
+Finally we can visualize the top results in a table:
+```{r}
+# knitr 
+knitr::kable(ora_up_filtered[1:20, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "**Top significant gene sets for upregulated genes for the Treatment Group**")
+
+knitr::kable(ora_down_filtered[1:20, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "**Top significant gene sets for downregulated genes for the Treatment Group**")
+
+knitr::kable(ora_all_filtered[1:20, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "**Top significant gene sets for all differentially expressed genes for the Treatment Group**")
+```
+
+## Placebo group
+Now we will do the same thing for the placebo group
+```{r}
+# Extract significantly up-regulated genes (logFC > 0, FDR < 0.05)
+up_genes <- rownames(topfit_Placebo$table)[topfit_Placebo$table$logFC > 0 & topfit_Placebo$table$FDR < 0.05]
+
+# Extract significantly down-regulated genes (logFC < 0, FDR < 0.05)
+down_genes <- rownames(topfit_Placebo$table)[topfit_Placebo$table$logFC < 0 & topfit_Placebo$table$FDR < 0.05]
+
+# Extract all differentially expressed genes (FDR < 0.05)
+all_genes <- rownames(topfit_Placebo$table)[topfit_Placebo$table$FDR < 0.05]
+
+# Run ORA for up-regulated genes
+ora_up_placebo <- gost(
+  query = up_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC") 
+)
+
+# Run ORA for down-regulated genes
+ora_down_placebo <- gost(
+  query = down_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC")
+)
+
+# Run ORA for all DE genes
+ora_all_placebo <- gost(
+  query = all_genes,
+  organism = "hsapiens",
+  correction_method = "fdr",
+  exclude_iea = TRUE,
+  ordered_query = FALSE,
+  significant = FALSE,
+  sources = c("GO", "KEGG", "REAC")
+)
+```
+
+Gene sets in upregulated genes before filtering: `r nrow(ora_up_placebo$result)`
+
+Gene sets in downregulated genes before filtering: `r nrow(ora_down_placebo$result)`
+
+Gene sets in all genes before filtering: `r nrow(ora_all_placebo$result)`
+
+Filter genes by term size:
+```{r}
+# Filter gene sets with a minimum of 10 genes and a maximum of 500 genes
+ora_up_placebo_filtered <- ora_up_placebo$result[ora_up_placebo$result$term_size >= 10 & ora_up_placebo$result$term_size <= 500, ]
+ora_down_placebo_filtered<- ora_down_placebo$result[ora_down_placebo$result$term_size >= 10 & ora_down_placebo$result$term_size <= 500, ]
+ora_all_placebo_filtered <- ora_all_placebo$result[ora_all_placebo$result$term_size >= 10 & ora_all_placebo$result$term_size <= 500, ]
+```
+
+Gene sets in upregulated genes after filtering: `r nrow(ora_up_placebo_filtered)`
+
+Gene sets in downregulated genes after filtering: `r nrow(ora_down_placebo_filtered)`
+
+Gene sets in all genes after filtering: `r nrow(ora_all_placebo_filtered)`
+
+Display results in table
+```{r}
+# knitr 
+knitr::kable(ora_up_placebo_filtered[1:50, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "*Top significant gene sets for upregulated genes**")
+
+knitr::kable(ora_down_placebo_filtered[1:50, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "**Top significant gene set hits for downregulated genes**")
+
+knitr::kable(ora_all_placebo_filtered[1:50, c("term_size", "term_name")], 
+      row.names = FALSE, 
+      caption = "**Top significant gene set hits for all differentially expressed genes**")
+```
+
+# Interpretation questions
+1. Do the over-representation results support conclusions or mechanism discussed in the original paper?
+
+Yes, the original paper identified 30 upregulated pathways, including:
+
+7 endocrine-related pathways
+
+5 signal transduction pathways
+
+4 nervous system pathways
+
+4 cellular community - eukaryotes pathways
+
+2 immune system pathways
+
+2 digestive system pathways
+
+1 development pathway
+
+1 cell motility pathway
+
+1 amino acid metabolism pathway
+
+1 signaling molecules and interaction pathway
+
+1 circulatory system pathway
+
+1 environmental adaptation pathway
+
+
+A lot of the pathways that were upregulated in my top hits also align with the pathways that were identified by the authors, namely the upregulation of phosphatidylinositol 3-kinase/protein kinase B signal transduction which we see in my ORA results or the PI3K-Akt-Pathway, is heavily discussed in the paper.
+
+2. Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.
+
+Yes, we can already find papers that support that resistance training causes the upregulation of the PI3K-Akt-Pathway [@Feng2022], which is a pathway known to be involved in muscle synthesis [@Glass2010]. additionally, we see that in our significant gene sets, in the treatment group the PI3K-Akt-Pathway is significantly higher on the list (ranked by p-value), supporting that it is more significantly enriched in the treatment group compared to the placebo. This is also supported by literature [@OertzenHagemann2019]
+
+# References
+This analysis uses several R packages including `BiocManager` [@BiocManager], `edgeR` [@edgeR], `knitr` [@knitr], `ggplot2` [@ggplot2], `limma` [@limma], `gprofiler2` [@gprofiler2], `ComplexHeatmap` [@ComplexHeatmap], and `circlize` [@circlize].
